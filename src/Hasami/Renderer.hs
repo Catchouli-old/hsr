@@ -1,4 +1,5 @@
-module Hasami.Renderer where
+module Hasami.Renderer
+where
 
 import SDL (($=))
 import qualified SDL
@@ -10,6 +11,7 @@ import Data.Vect
 --import Paths_hasami
 import Foreign
 import Graphics.GLUtil (readTexture, texture2DWrap)
+import qualified Data.Vector.Storable as V
 
 class Mat a where
   toGLMat :: a -> IO (GL.GLmatrix Float)
@@ -34,21 +36,26 @@ runRS a = runStateT (unpackRS a)
 
 -- | Renderer state
 data RenderState = RenderState
-  { _swapBuffers :: IO ()
+  { _rendererWindow :: SDL.Window
   }
 makeLenses ''RenderState
 
--- | Initial renderer state
-initialRenderState :: RenderState
-initialRenderState = RenderState
-  { _swapBuffers = undefined
-  }
+-- | Swap buffers
+swapBuffers :: (MonadState RenderState m, MonadIO m) => m ()
+swapBuffers = do
+  win <- use rendererWindow
+  liftIO $ SDL.glSwapWindow win
+
+renderClear :: (MonadIO m) => GL.GLfloat -> GL.GLfloat -> GL.GLfloat -> GL.GLfloat -> m ()
+renderClear r g b a = liftIO $ do
+  GL.clearColor $= GL.Color4 r g b a
+  GL.clear [GL.ColorBuffer]
 
 -- | Initialise renderer
 initRenderer :: SDL.Window -> IO RenderState
 initRenderer win = do
   pure $ RenderState
-    { _swapBuffers = SDL.glSwapWindow win
+    { _rendererWindow = win
     }
 
 -- Attribute locations
@@ -63,8 +70,28 @@ initAttribs prog = do
   GL.attribLocation prog "in_pos" $= posAttrib
   GL.attribLocation prog "in_uvs" $= uvsAttrib
 
+-- | Shader
+data Shader = Shader
+  { programId :: GL.Program
+  }
+
+-- | Bind shader
+bindShader :: MonadIO m => Shader -> m ()
+bindShader (Shader prog) = GL.currentProgram $= Just prog
+
+-- | Unbind shader
+unbindShader :: MonadIO m => m ()
+unbindShader = GL.currentProgram $= Nothing
+
+-- | Set uniform
+setUniform :: (GL.Uniform a, MonadIO m) => Shader -> String -> a -> m ()
+setUniform (Shader prog) name val = do
+  GL.currentProgram $= Just prog
+  loc <- GL.get (GL.uniformLocation prog name)
+  GL.uniform loc $= val
+
 -- | Load shader
-loadShader :: FilePath -> IO (GL.Program)
+loadShader :: FilePath -> IO Shader
 loadShader path = do
   source <- readFile path
   let vsSource = foldr (++) "" ["#version 330\n", "#define BUILDING_VERTEX_SHADER\n", source]
@@ -101,12 +128,61 @@ loadShader path = do
     plog <- GL.get $ GL.programInfoLog prog
     putStrLn plog
 
-  pure prog
+  pure $ Shader { programId = prog
+                }
+
+-- | Texture type
+data Texture = Texture
+  { textureId :: GL.TextureObject
+  }
+
+-- | Bind texture to unit in shader
+bindTexture :: MonadIO m => Shader -> String -> GL.GLuint -> Texture -> m ()
+bindTexture shader uniform unit (Texture texid) = do
+  setUniform shader uniform (GL.TextureUnit unit)
+  GL.activeTexture $= GL.TextureUnit unit
+  GL.textureBinding GL.Texture2D $= Just texid
 
 -- | Load texture
-loadTex :: FilePath -> IO GL.TextureObject
+loadTex :: FilePath -> IO Texture
 loadTex path = do
   t <- either error id <$> readTexture path
   GL.textureFilter GL.Texture2D $= ((GL.Linear', Nothing), GL.Linear')
   texture2DWrap $= (GL.Repeated, GL.ClampToEdge)
-  return t
+  return $ Texture t
+
+-- | Buffer
+data Buffer a = Buffer
+  { bufferData :: V.Vector a
+  , posDims :: Maybe Int32
+  , uvsDims :: Maybe Int32
+  }
+
+-- | Draw buffer
+drawBuffer :: Storable a => Buffer a -> IO ()
+drawBuffer (Buffer vec pos uvs) = do
+  let undefA = V.head vec
+  let moz = maybe 0 id
+  let stride = fromIntegral (sizeOf undefA) * (moz pos + moz uvs) :: Int32
+  let posOffset = 0
+  let uvsOffset = fromIntegral (sizeOf undefA) * fromIntegral (moz pos)
+  let elementCount = fromIntegral (sizeOf undefA * V.length vec `div` fromIntegral stride) :: Int32
+
+  case pos of
+     Nothing -> GL.vertexAttribArray posAttrib $= GL.Disabled
+     Just i -> do
+       GL.vertexAttribArray posAttrib $= GL.Enabled
+       V.unsafeWith vec $ \ptr ->
+         GL.vertexAttribPointer posAttrib $= (GL.ToFloat, GL.VertexArrayDescriptor i GL.Float stride (plusPtr ptr posOffset))
+
+  case uvs of
+    Nothing -> GL.vertexAttribArray uvsAttrib $= GL.Disabled
+    Just i -> do
+      GL.vertexAttribArray uvsAttrib $= GL.Enabled
+      V.unsafeWith vec $ \ptr ->
+        GL.vertexAttribPointer uvsAttrib $= (GL.ToFloat, GL.VertexArrayDescriptor i GL.Float stride (plusPtr ptr uvsOffset))
+
+  GL.drawArrays GL.Triangles 0 elementCount
+
+  GL.vertexAttribArray posAttrib $= GL.Disabled
+  GL.vertexAttribArray uvsAttrib $= GL.Disabled

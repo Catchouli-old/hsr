@@ -5,15 +5,12 @@ module App
   )
 where
 
-import SDL (($=))
 import qualified SDL
 import Control.Monad (unless)
 import Control.Monad.State
 import Control.Lens
-import qualified Graphics.Rendering.OpenGL as GL
 import qualified Data.Vector.Storable as V
 import Data.Vect
-import Foreign
 
 import Hasami.Renderer
 import Hasami.Resources
@@ -30,13 +27,13 @@ liftRS :: RS a -> App a
 liftRS = App . lift
 
 -- | Run IO in an RS in our app monad
-liftRSIO :: RS (IO a) -> App a
-liftRSIO = liftRS >=> liftIO
+--liftRSIO :: RS (IO a) -> App a
+--liftRSIO = liftRS >=> liftIO
 
 -- | App state
 data AppState = AppState
-  { _shaderProgram :: GL.Program
-  , _texture :: GL.TextureObject
+  { _shaderProgram :: Shader
+  , _texture :: Texture
   }
 makeLenses ''AppState
 
@@ -60,21 +57,18 @@ loop = do
   events <- SDL.pollEvents
   let quit = elem SDL.QuitEvent $ map SDL.eventPayload events
 
-  prog <- use shaderProgram
+  shader <- use shaderProgram
   tex <- use texture
 
   liftIO $ do
+    -- Get current time
     time <- SDL.time
 
+    -- Set up projection matrix
     let offset = Vec3 (sin time) 0 0
     let trans = translate4 offset idmtx
 
-    GL.clearColor $= GL.Color4 1 0 1 1
-    GL.clear [GL.ColorBuffer]
-
-    mvpLoc <- GL.get (GL.uniformLocation prog "uni_mvp")
-    texLoc <- GL.get (GL.uniformLocation prog "uni_tex")
-
+    -- Vertex buffer
     let vertices = V.fromList @Float [ -0.5, -0.5, 0.0, 1.0
                                      ,  0.5, -0.5, 1.0, 1.0
                                      ,  0.5,  0.5, 1.0, 0.0
@@ -82,27 +76,17 @@ loop = do
                                      , -0.5,  0.5, 0.0, 0.0
                                      , -0.5, -0.5, 0.0, 1.0
                                      ]
+    let buf = Buffer vertices (Just 2) (Just 2)
 
-    GL.currentProgram $= Just prog
+    -- Clear window
+    renderClear 1 0 1 1
 
-    GL.activeTexture $= GL.TextureUnit 0
-    GL.texture GL.Texture2D $= GL.Enabled
-    GL.textureBinding GL.Texture2D $= Just tex
+    bindShader shader
+    bindTexture shader "uni_tex" 0 tex
+    setUniform shader "uni_mvp" =<< toGLMat trans
+    drawBuffer buf
 
-    GL.uniform texLoc $= GL.TextureUnit 0
-    (GL.uniform mvpLoc $=) =<< toGLMat trans
-
-    GL.vertexAttribArray posAttrib $= GL.Enabled
-    GL.vertexAttribArray uvsAttrib $= GL.Enabled
-    V.unsafeWith vertices $ \ptr ->
-      GL.vertexAttribPointer posAttrib $= (GL.ToFloat, GL.VertexArrayDescriptor 2 GL.Float 16 ptr)
-    V.unsafeWith vertices $ \ptr ->
-      GL.vertexAttribPointer uvsAttrib $= (GL.ToFloat, GL.VertexArrayDescriptor 2 GL.Float 16 (plusPtr ptr 8))
-    GL.drawArrays GL.Triangles 0 6
-    GL.vertexAttribArray posAttrib $= GL.Disabled
-    GL.vertexAttribArray uvsAttrib $= GL.Disabled
-
-  liftRSIO $ use swapBuffers
+  liftRS $ swapBuffers
 
   unless quit loop
 
