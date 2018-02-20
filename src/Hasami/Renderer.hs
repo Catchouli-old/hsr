@@ -13,20 +13,6 @@ import Foreign
 import Graphics.GLUtil (readTexture, texture2DWrap)
 import qualified Data.Vector.Storable as V
 
-class Mat a where
-  toGLMat :: a -> IO (GL.GLmatrix Float)
-  
-instance Mat Mat4 where
-  toGLMat (Mat4 (Vec4 a b c d) (Vec4 e f g h) (Vec4 i j k l) (Vec4 m n o p)) = do
-    let mat = [a, b, c, d, e, f, g, h, i, j, k, l, m, n, o, p]
-    GL.newMatrix GL.ColumnMajor mat :: IO (GL.GLmatrix Float)
-
-instance Mat Proj4 where
-  toGLMat proj = toGLMat . fromProjective $ proj
-
-unsafeWith :: Storable a => a -> (Ptr b -> IO c) -> IO c
-unsafeWith v act = alloca $ \a -> poke a v >> act (castPtr a)
-
 -- | RenderState monad
 newtype RS a = RS {unpackRS :: StateT RenderState IO a} deriving (Monad, Applicative, Functor, MonadIO, MonadState RenderState)
 
@@ -40,16 +26,34 @@ data RenderState = RenderState
   }
 makeLenses ''RenderState
 
--- | Swap buffers
-swapBuffers :: (MonadState RenderState m, MonadIO m) => m ()
-swapBuffers = do
-  win <- use rendererWindow
-  liftIO $ SDL.glSwapWindow win
+-- | Shader
+data Shader = Shader
+  { programId :: GL.Program
+  }
 
-renderClear :: (MonadIO m) => GL.GLfloat -> GL.GLfloat -> GL.GLfloat -> GL.GLfloat -> m ()
-renderClear r g b a = liftIO $ do
-  GL.clearColor $= GL.Color4 r g b a
-  GL.clear [GL.ColorBuffer]
+-- | Texture type
+data Texture = Texture
+  { textureId :: GL.TextureObject
+  }
+
+-- | Buffer
+data Buffer a = Buffer
+  { bufferData :: V.Vector a
+  , posDims :: Maybe Int32
+  , uvsDims :: Maybe Int32
+  }
+
+-- Attribute locations
+posAttrib :: GL.AttribLocation
+uvsAttrib :: GL.AttribLocation
+posAttrib = GL.AttribLocation 0
+uvsAttrib = GL.AttribLocation 1
+
+-- | Bind our standard attrib locations to a shader
+initAttribs :: GL.Program -> IO ()
+initAttribs prog = do
+  GL.attribLocation prog "in_pos" $= posAttrib
+  GL.attribLocation prog "in_uvs" $= uvsAttrib
 
 -- | Initialise renderer
 initRenderer :: SDL.Window -> IO RenderState
@@ -58,22 +62,17 @@ initRenderer win = do
     { _rendererWindow = win
     }
 
--- Attribute locations
-posAttrib :: GL.AttribLocation
-uvsAttrib :: GL.AttribLocation
-posAttrib = GL.AttribLocation 0
-uvsAttrib = GL.AttribLocation 1
+-- | Swap buffers
+swapBuffers :: (MonadState RenderState m, MonadIO m) => m ()
+swapBuffers = do
+  win <- use rendererWindow
+  liftIO $ SDL.glSwapWindow win
 
--- | Bind our standard attrib locations
-initAttribs :: GL.Program -> IO ()
-initAttribs prog = do
-  GL.attribLocation prog "in_pos" $= posAttrib
-  GL.attribLocation prog "in_uvs" $= uvsAttrib
-
--- | Shader
-data Shader = Shader
-  { programId :: GL.Program
-  }
+-- | Clear framebuffer
+renderClear :: (MonadIO m) => GL.GLfloat -> GL.GLfloat -> GL.GLfloat -> GL.GLfloat -> m ()
+renderClear r g b a = liftIO $ do
+  GL.clearColor $= GL.Color4 r g b a
+  GL.clear [GL.ColorBuffer]
 
 -- | Bind shader
 bindShader :: MonadIO m => Shader -> m ()
@@ -131,11 +130,6 @@ loadShader path = do
   pure $ Shader { programId = prog
                 }
 
--- | Texture type
-data Texture = Texture
-  { textureId :: GL.TextureObject
-  }
-
 -- | Bind texture to unit in shader
 bindTexture :: MonadIO m => Shader -> String -> GL.GLuint -> Texture -> m ()
 bindTexture shader uniform unit (Texture texid) = do
@@ -150,13 +144,6 @@ loadTex path = do
   GL.textureFilter GL.Texture2D $= ((GL.Linear', Nothing), GL.Linear')
   texture2DWrap $= (GL.Repeated, GL.ClampToEdge)
   return $ Texture t
-
--- | Buffer
-data Buffer a = Buffer
-  { bufferData :: V.Vector a
-  , posDims :: Maybe Int32
-  , uvsDims :: Maybe Int32
-  }
 
 -- | Draw buffer
 drawBuffer :: Storable a => Buffer a -> IO ()
@@ -186,3 +173,18 @@ drawBuffer (Buffer vec pos uvs) = do
 
   GL.vertexAttribArray posAttrib $= GL.Disabled
   GL.vertexAttribArray uvsAttrib $= GL.Disabled
+
+-- Renderer utils
+class Mat a where
+  toGLMat :: a -> IO (GL.GLmatrix Float)
+  
+instance Mat Mat4 where
+  toGLMat (Mat4 (Vec4 a b c d) (Vec4 e f g h) (Vec4 i j k l) (Vec4 m n o p)) = do
+    let mat = [a, b, c, d, e, f, g, h, i, j, k, l, m, n, o, p]
+    GL.newMatrix GL.ColumnMajor mat :: IO (GL.GLmatrix Float)
+
+instance Mat Proj4 where
+  toGLMat proj = toGLMat . fromProjective $ proj
+
+unsafeWith :: Storable a => a -> (Ptr b -> IO c) -> IO c
+unsafeWith v act = alloca $ \a -> poke a v >> act (castPtr a)
