@@ -12,6 +12,7 @@ import Control.Lens
 import qualified Data.Vector.Storable as V
 import Data.Vect
 
+import Nuklear
 import Hasami.Renderer
 import Hasami.Resources
 

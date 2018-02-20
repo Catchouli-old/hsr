@@ -30,6 +30,7 @@ dependencies:
 - bytestring
 - vector
 - vect
+- inline-c
 
 ghc-options:
 - -Wall
@@ -37,6 +38,7 @@ ghc-options:
 - -Wincomplete-record-updates
 - -Wincomplete-uni-patterns
 - -Wredundant-constraints
+- -fobject-code
 
 default-extensions:
 - OverloadedStrings
