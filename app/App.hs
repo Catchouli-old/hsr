@@ -35,6 +35,7 @@ liftRS = App . lift
 data AppState = AppState
   { _shaderProgram :: Shader
   , _texture :: Texture
+  , _nuklearContext :: NK
   }
 makeLenses ''AppState
 
@@ -43,9 +44,13 @@ initApp :: RS (AppState)
 initApp = do
   prog <- liftIO $ resourcePath >=> loadShader $ "sprite.glsl"
   tex <- liftIO $ resourcePath >=> loadTex $ "patchouli.png"
+  win <- use rendererWindow
+  nk <- liftIO $ initNuklear win
+  _ <- liftIO $ nuklearInitAtlas
   pure $ AppState
     { _shaderProgram = prog
     , _texture = tex
+    , _nuklearContext = nk
     }
 
 -- | Application
@@ -55,11 +60,16 @@ app = loop
 -- | Main loop
 loop :: App ()
 loop = do
-  events <- SDL.pollEvents
+  evt <- pollEvents'
+  let rawEvents = map snd evt
+  let events = map fst evt
   let quit = elem SDL.QuitEvent $ map SDL.eventPayload events
 
   shader <- use shaderProgram
   tex <- use texture
+  nk <- use nuklearContext
+
+  liftIO $ nuklearHandleEvents nk rawEvents
 
   liftIO $ do
     -- Get current time
@@ -86,6 +96,10 @@ loop = do
     bindTexture shader "uni_tex" 0 tex
     setUniform shader "uni_mvp" =<< toGLMat trans
     drawBuffer buf
+    unbindShader
+
+    test nk
+    nuklearRender
 
   liftRS $ swapBuffers
 

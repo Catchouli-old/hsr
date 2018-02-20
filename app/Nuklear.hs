@@ -2,74 +2,92 @@
 
 module Nuklear where
 
-import Foreign.Ptr
+import qualified SDL as SDL
+import qualified SDL.Internal.Types as SDL
+import qualified SDL.Raw as Raw
+import Control.Monad.IO.Class
+import Foreign
 import qualified Language.C.Inline as C
 
-C.verbatim "#define NK_IMPLEMENTATION"
+C.verbatim "#define NK_INCLUDE_FIXED_TYPES"
+C.verbatim "#define NK_INCLUDE_STANDARD_IO"
+C.verbatim "#define NK_INCLUDE_STANDARD_VARARGS"
 C.verbatim "#define NK_INCLUDE_DEFAULT_ALLOCATOR"
+C.verbatim "#define NK_INCLUDE_VERTEX_BUFFER_OUTPUT"
 C.verbatim "#define NK_INCLUDE_FONT_BAKING"
 C.verbatim "#define NK_INCLUDE_DEFAULT_FONT"
-C.verbatim "#define NK_INCLUDE_VERTEX_BUFFER_OUTPUT"
+C.verbatim "#define NK_IMPLEMENTATION"
+C.verbatim "#define NK_SDL_GL2_IMPLEMENTATION"
 C.include "../nuklear/nuklear.h"
+C.include "../nuklear/nuklear_sdl_gl2.h"
 C.include "<stdio.h>"
 
-C.verbatim "typedef struct {"
-C.verbatim "  struct nk_buffer cmds;"
-C.verbatim "  struct nk_draw_null_texture null;"
-C.verbatim "} nk_device;"
-
-C.verbatim "typedef struct {"
-C.verbatim "  float position[2];"
-C.verbatim "  float uv[2];"
-C.verbatim "  nk_byte col[4];"
-C.verbatim "} nk_vertex;"
-
-C.verbatim "typedef struct {"
-C.verbatim "  struct nk_context ctx;"
-C.verbatim "  nk_device ogl;"
-C.verbatim "  struct nk_font_atlas atlas;"
-C.verbatim "} nk_ctx;"
-
 data NK = NK (Ptr ()) deriving Show
+data NKAtlas = NKAtlas (Ptr ()) deriving Show
 
-initNuklear :: IO NK
-initNuklear = do
+-- | Initialise nuklear
+initNuklear :: SDL.Window -> IO NK
+initNuklear (SDL.Window ptr) = do
   ctx <- [C.block| void* {
-    nk_ctx* ctx = calloc(1, sizeof(nk_ctx));
-
-    nk_init_default(&ctx->ctx, 0);
-    nk_buffer_init_default(&ctx->ogl.cmds);
-
-    nk_font_atlas_init_default(&ctx->atlas);
-    nk_font_atlas_begin(&ctx->atlas);
-
-    void* image; int w, h;
-    image = nk_font_atlas_bake(&ctx->atlas, &w, &h, NK_FONT_ATLAS_RGBA32);
-
-    nk_font_atlas_end(&ctx->atlas, nk_handle_ptr(image), &ctx->ogl.null);
-
-    if (ctx->atlas.default_font)
-       nk_style_set_font(&ctx->ctx, &ctx->atlas.default_font->handle);
-
+    SDL_Window* win = $(void* ptr);
+    struct nk_context* ctx = nk_sdl_init(win);
     return ctx;
   } |]
   pure $ NK ctx
 
-destroyNuklear :: NK -> IO ()
-destroyNuklear (NK ptr) = do
+-- | Initialise atlas with default font
+nuklearInitAtlas :: IO NKAtlas
+nuklearInitAtlas = do
+  atlas <- [C.block| void* {
+    struct nk_font_atlas* atlas;
+    nk_sdl_font_stash_begin(&atlas);
+    nk_sdl_font_stash_end();
+    return atlas;
+  } |]
+  pure $ NKAtlas atlas
+
+-- | pollEvent except it also returns the raw events
+pollEvent' :: MonadIO m => m (Maybe (SDL.Event, Ptr Raw.Event))
+pollEvent' = liftIO $ alloca $ \e -> do
+  n <- Raw.pollEvent e
+  if n == 0
+     then return Nothing
+     else do
+       converted <- (peek e >>= SDL.convertRaw)
+       pure $ Just $ (converted, e)
+
+-- | pollEvents except it also returns the raw events
+pollEvents' :: (MonadIO m) => m [(SDL.Event, Ptr Raw.Event)]
+pollEvents' =
+  do e <- pollEvent'
+     case e of
+       Nothing -> return []
+       Just e' -> (e' :) <$> pollEvents'
+
+-- | Handle events
+nuklearHandleEvents :: NK -> [Ptr Raw.Event] -> IO ()
+nuklearHandleEvents (NK ptr) evts = do
+  [C.block| void { nk_input_begin($(void* ptr)); } |]
+  mapM_ nuklearHandleEvent evts
+  [C.block| void { nk_input_end($(void* ptr)); } |]
+
+nuklearHandleEvent :: Ptr Raw.Event -> IO ()
+nuklearHandleEvent evt = let ptr = castPtr evt in
   [C.block| void {
-    nk_ctx* ctx = $(void* ptr);
-    free(ctx);
+    SDL_Event* evt = $(void* ptr);
+    nk_sdl_handle_event(evt);
+  } |]
+
+-- | Render
+nuklearRender :: IO ()
+nuklearRender = [C.block| void {
+    nk_sdl_render(NK_ANTI_ALIASING_ON);
   } |]
 
 test :: NK -> IO ()
 test (NK ptr) = do
   [C.block| void {
-    nk_ctx* NK = $(void* ptr);
-    struct nk_context* ctx = &NK->ctx;
-
-    nk_input_begin(ctx);
-    nk_input_end(ctx);
+    struct nk_context* ctx = $(void* ptr);
 
     struct nk_colorf bg;
     bg.r = 0.1f; bg.g = 0.18f; bg.b = 0.24f; bg.a = 1.0f;
@@ -105,36 +123,4 @@ test (NK ptr) = do
       }
     }
     nk_end(ctx);
-  } |]
-
-renderNuklear :: NK -> IO ()
-renderNuklear (NK ptr) = do
-  [C.block| void {
-    nk_ctx* NK = $(void* ptr);
-    nk_device* dev = &NK->ogl;
-
-    const struct nk_draw_command* cmd;
-    const struct nk_draw_index* offset = NULL;
-    struct nk_buffer vbuf, ebuf;
-
-    /* fill converting configuration */
-    struct nk_convert_config config;
-    static const struct nk_draw_vertex_layout_element vertex_layout[] = {
-        {NK_VERTEX_POSITION, NK_FORMAT_FLOAT, NK_OFFSETOF(nk_vertex, position)},
-        {NK_VERTEX_TEXCOORD, NK_FORMAT_FLOAT, NK_OFFSETOF(nk_vertex, uv)},
-        {NK_VERTEX_COLOR, NK_FORMAT_R8G8B8A8, NK_OFFSETOF(nk_vertex, col)},
-        {NK_VERTEX_LAYOUT_END}
-    };
-    NK_MEMSET(&config, 0, sizeof(config));
-    config.vertex_layout = vertex_layout;
-    config.vertex_size = sizeof(nk_vertex);
-    config.vertex_alignment = NK_ALIGNOF(nk_vertex);
-    config.null = dev->null;
-    config.circle_segment_count = 22;
-    config.curve_segment_count = 22;
-    config.arc_segment_count = 22;
-    config.global_alpha = 1.0f;
-    config.shape_AA = NK_ANTI_ALIASING_ON;
-    config.line_AA = NK_ANTI_ALIASING_ON;
-
   } |]
