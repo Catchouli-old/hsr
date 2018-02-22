@@ -11,46 +11,41 @@ import Control.Monad.State
 import Control.Lens
 import qualified Data.Vector.Storable as V
 import Data.Vect
+import qualified Graphics.Rendering.OpenGL as GL
 
 import Nuklear
 import Hasami.Renderer
 import Hasami.Resources
 
 -- | App state monad
-newtype App a = App {unpackApp :: StateT AppState RS a} deriving (Monad, Applicative, Functor, MonadIO, MonadState AppState)
+newtype App a = App {unpackApp :: StateT AppState IO a} deriving (Monad, Applicative, Functor, MonadIO, MonadState AppState)
 
 -- | Run app state
-runApp :: App a -> AppState -> RS (a, AppState)
+runApp :: App a -> AppState -> IO (a, AppState)
 runApp a = runStateT (unpackApp a)
-
--- | Lift RS into app
-liftRS :: RS a -> App a
-liftRS = App . lift
-
--- | Run IO in an RS in our app monad
---liftRSIO :: RS (IO a) -> App a
---liftRSIO = liftRS >=> liftIO
 
 -- | App state
 data AppState = AppState
   { _shaderProgram :: Shader
   , _texture :: Texture
   , _nuklearContext :: NK
+  , _renderer' :: Renderer
   }
 makeLenses ''AppState
 
 -- | Initialise app
-initApp :: RS (AppState)
-initApp = do
-  prog <- liftIO $ resourcePath >=> loadShader $ "sprite.glsl"
-  tex <- liftIO $ resourcePath >=> loadTex $ "patchouli.png"
-  win <- use rendererWindow
-  nk <- liftIO $ initNuklear win
-  _ <- liftIO $ nuklearInitAtlas
+initApp :: SDL.Window -> IO (AppState)
+initApp win = do
+  renderer <- liftIO $ createRenderer win
+  prog <- resourcePath >=> loadShader renderer $ "sprite.glsl"
+  tex <- resourcePath >=> loadTexture renderer $ "patchouli.png"
+  nk <- initNuklear win
+  _ <- nuklearInitAtlas
   pure $ AppState
     { _shaderProgram = prog
     , _texture = tex
     , _nuklearContext = nk
+    , _renderer' = renderer
     }
 
 -- | Application
@@ -65,6 +60,7 @@ loop = do
   let events = map fst evt
   let quit = elem SDL.QuitEvent $ map SDL.eventPayload events
 
+  renderer <- use renderer'
   shader <- use shaderProgram
   tex <- use texture
   nk <- use nuklearContext
@@ -87,21 +83,22 @@ loop = do
                                      , -0.5,  0.5, 0.0, 0.0
                                      , -0.5, -0.5, 0.0, 1.0
                                      ]
-    let buf = Buffer vertices (Just 2) (Just 2)
+    let buf = createBuffer renderer vertices (Just 2) (Just 2)
 
     -- Clear window
-    renderClear 1 0 1 1
+    renderClear renderer 1 0 1 1
 
     bindShader shader
-    bindTexture shader "uni_tex" 0 tex
+    bindTexture tex 0
+    setUniform shader "uni_tex" (GL.TextureUnit 0)
     setUniform shader "uni_mvp" =<< toGLMat trans
     drawBuffer buf
-    unbindShader
+    unbindShader shader
 
     test nk
     nuklearRender
 
-  liftRS $ swapBuffers
+  liftIO $ swapBuffers renderer
 
   unless quit loop
 

@@ -1,46 +1,48 @@
 module Hasami.Renderer
+  ( Renderer(..)
+  , Texture(..)
+  , Buffer(..)
+  , Shader(..)
+  , createRenderer
+  , toGLMat
+  )
 where
 
 import SDL (($=))
 import qualified SDL
 import Control.Monad (unless)
 import Control.Monad.State
-import Control.Lens
 import qualified Graphics.Rendering.OpenGL as GL
 import Data.Vect
---import Paths_hasami
 import Foreign
 import Graphics.GLUtil (readTexture, texture2DWrap)
 import qualified Data.Vector.Storable as V
 
--- | RenderState monad
-newtype RS a = RS {unpackRS :: StateT RenderState IO a} deriving (Monad, Applicative, Functor, MonadIO, MonadState RenderState)
-
--- | Function to run a render state
-runRS :: RS a -> RenderState -> IO (a, RenderState)
-runRS a = runStateT (unpackRS a)
-
--- | Renderer state
-data RenderState = RenderState
-  { _rendererWindow :: SDL.Window
+-- | Renderer interface
+data Renderer = Renderer
+  { swapBuffers :: IO ()
+  , renderClear :: GL.GLfloat -> GL.GLfloat -> GL.GLfloat -> GL.GLfloat -> IO ()
+  , loadShader :: FilePath -> IO (Shader)
+  , loadTexture :: FilePath -> IO (Texture)
+  , createBuffer :: forall a. (Storable a) => V.Vector a -> Maybe Int32 -> Maybe Int32 -> Buffer a
   }
-makeLenses ''RenderState
 
--- | Shader
+-- | Texture interface
+data Texture = Texture
+  { bindTexture :: forall m. MonadIO m => GL.GLuint -> m ()
+  }
+
+-- | Buffer interface
+data Buffer a = Buffer
+  { drawBuffer :: IO ()
+  }
+
+-- | Shader interface
 data Shader = Shader
   { programId :: GL.Program
-  }
-
--- | Texture type
-data Texture = Texture
-  { textureId :: GL.TextureObject
-  }
-
--- | Buffer
-data Buffer a = Buffer
-  { bufferData :: V.Vector a
-  , posDims :: Maybe Int32
-  , uvsDims :: Maybe Int32
+  , bindShader :: forall m. MonadIO m => m ()
+  , unbindShader :: forall m. MonadIO m => m ()
+  , setUniform :: forall m. MonadIO m => forall a. GL.Uniform a => String -> a -> m ()
   }
 
 -- Attribute locations
@@ -49,49 +51,20 @@ uvsAttrib :: GL.AttribLocation
 posAttrib = GL.AttribLocation 0
 uvsAttrib = GL.AttribLocation 1
 
--- | Bind our standard attrib locations to a shader
-initAttribs :: GL.Program -> IO ()
-initAttribs prog = do
-  GL.attribLocation prog "in_pos" $= posAttrib
-  GL.attribLocation prog "in_uvs" $= uvsAttrib
-
--- | Initialise renderer
-initRenderer :: SDL.Window -> IO RenderState
-initRenderer win = do
-  pure $ RenderState
-    { _rendererWindow = win
+-- | Create a GL renderer
+createRenderer :: SDL.Window -> IO Renderer
+createRenderer win = do
+  pure $ Renderer
+    { swapBuffers = SDL.glSwapWindow win
+    , renderClear = \r g b a -> (GL.clearColor $= GL.Color4 r g b a) >> GL.clear [GL.ColorBuffer]
+    , loadShader = loadShader'
+    , loadTexture = loadTexture'
+    , createBuffer = createBuffer'
     }
 
--- | Swap buffers
-swapBuffers :: (MonadState RenderState m, MonadIO m) => m ()
-swapBuffers = do
-  win <- use rendererWindow
-  liftIO $ SDL.glSwapWindow win
-
--- | Clear framebuffer
-renderClear :: (MonadIO m) => GL.GLfloat -> GL.GLfloat -> GL.GLfloat -> GL.GLfloat -> m ()
-renderClear r g b a = liftIO $ do
-  GL.clearColor $= GL.Color4 r g b a
-  GL.clear [GL.ColorBuffer]
-
--- | Bind shader
-bindShader :: MonadIO m => Shader -> m ()
-bindShader (Shader prog) = GL.currentProgram $= Just prog
-
--- | Unbind shader
-unbindShader :: MonadIO m => m ()
-unbindShader = GL.currentProgram $= Nothing
-
--- | Set uniform
-setUniform :: (GL.Uniform a, MonadIO m) => Shader -> String -> a -> m ()
-setUniform (Shader prog) name val = do
-  GL.currentProgram $= Just prog
-  loc <- GL.get (GL.uniformLocation prog name)
-  GL.uniform loc $= val
-
--- | Load shader
-loadShader :: FilePath -> IO Shader
-loadShader path = do
+-- | Implementation of Renderer loadShader
+loadShader' :: FilePath -> IO (Shader)
+loadShader' path = do
   source <- readFile path
   let vsSource = foldr (++) "" ["#version 330\n", "#define BUILDING_VERTEX_SHADER\n", source]
   let fsSource = foldr (++) "" ["#version 330\n", "#define BUILDING_FRAGMENT_SHADER\n", source]
@@ -117,7 +90,11 @@ loadShader path = do
   prog <- GL.createProgram
   GL.attachShader prog vs
   GL.attachShader prog fs
-  initAttribs prog
+
+  -- Bind our standard attrib locations
+  GL.attribLocation prog "in_pos" $= posAttrib
+  GL.attribLocation prog "in_uvs" $= uvsAttrib
+
   GL.linkProgram prog
   linkOK <- GL.get $ GL.linkStatus prog
   GL.validateProgram prog
@@ -128,26 +105,35 @@ loadShader path = do
     putStrLn plog
 
   pure $ Shader { programId = prog
+                , bindShader = GL.currentProgram $= Just prog
+                , unbindShader = GL.currentProgram $= Nothing
+                , setUniform = \name val -> do
+                    GL.currentProgram $= Just prog
+                    loc <- GL.get (GL.uniformLocation prog name)
+                    GL.uniform loc $= val
                 }
 
--- | Bind texture to unit in shader
-bindTexture :: MonadIO m => Shader -> String -> GL.GLuint -> Texture -> m ()
-bindTexture shader uniform unit (Texture texid) = do
-  setUniform shader uniform (GL.TextureUnit unit)
-  GL.activeTexture $= GL.TextureUnit unit
-  GL.textureBinding GL.Texture2D $= Just texid
-
--- | Load texture
-loadTex :: FilePath -> IO Texture
-loadTex path = do
+-- | Implementation of Renderer loadTexture
+loadTexture' :: FilePath -> IO Texture
+loadTexture' path = do
   t <- either error id <$> readTexture path
   GL.textureFilter GL.Texture2D $= ((GL.Linear', Nothing), GL.Linear')
   texture2DWrap $= (GL.Repeated, GL.ClampToEdge)
-  return $ Texture t
+  return $ Texture
+    { bindTexture = \unit -> do
+        GL.activeTexture $= GL.TextureUnit unit
+        GL.textureBinding GL.Texture2D $= Just t
+    }
 
--- | Draw buffer
-drawBuffer :: Storable a => Buffer a -> IO ()
-drawBuffer (Buffer vec pos uvs) = do
+-- | Implementation of Renderer createBuffer
+createBuffer' :: Storable a => V.Vector a -> Maybe Int32 -> Maybe Int32 -> Buffer a
+createBuffer' bufferData posDims uvsDims = Buffer
+  { drawBuffer = drawBuffer' bufferData posDims uvsDims
+  }
+
+-- | Implementation of Buffer drawBuffer
+drawBuffer' :: Storable a => V.Vector a -> Maybe Int32 -> Maybe Int32 -> IO ()
+drawBuffer' vec pos uvs = do
   let undefA = V.head vec
   let moz = maybe 0 id
   let stride = fromIntegral (sizeOf undefA) * (moz pos + moz uvs) :: Int32
@@ -185,6 +171,3 @@ instance Mat Mat4 where
 
 instance Mat Proj4 where
   toGLMat proj = toGLMat . fromProjective $ proj
-
-unsafeWith :: Storable a => a -> (Ptr b -> IO c) -> IO c
-unsafeWith v act = alloca $ \a -> poke a v >> act (castPtr a)

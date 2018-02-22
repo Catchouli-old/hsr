@@ -39,6 +39,7 @@ ghc-options:
 - -Wincomplete-uni-patterns
 - -Wredundant-constraints
 - -fobject-code
+- -O2
 
 default-extensions:
 - OverloadedStrings
@@ -60,6 +61,7 @@ default-extensions:
 - TypeApplications
 - DefaultSignatures
 - TemplateHaskell
+- RankNTypes
 
 library:
   source-dirs: src
