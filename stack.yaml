@@ -43,6 +43,7 @@ packages:
 extra-deps:
 - vect-0.4.7
 - GLUtil-0.9.3
+- Stack-0.3.2
 - git: https://github.com/Catchouli-Libraries/sdl2.git
   commit: 4eba3351e64cb79b4878fc779e851a6502d93500
   #commit: bc30282eca6c04d1f910f2f3c96b0a64cf84f158

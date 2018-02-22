@@ -13,6 +13,8 @@ import Control.Monad.IO.Class
 import Graphics.GLUtil (readTexture, texture2DWrap)
 import qualified Data.Vector.Storable as V
 import qualified Graphics.Rendering.OpenGL as GL
+import Data.IORef
+import qualified Data.Map.Strict as M
 
 import Hasami.Renderer
 
@@ -27,11 +29,17 @@ createRenderer :: SDL.Window -> IO Renderer
 createRenderer win = do
   pure $ Renderer
     { swapBuffers = SDL.glSwapWindow win
-    , renderClear = \r g b a -> liftIO $ (GL.clearColor $= GL.Color4 r g b a) >> GL.clear [GL.ColorBuffer]
+    , renderClear = renderClear'
     , loadShader = loadShader'
     , loadTexture = loadTexture'
     , createBuffer = createBuffer'
     }
+
+-- | Implementation of Renderer renderClear
+renderClear' :: MonadIO m => Float -> Float -> Float -> Float -> m ()
+renderClear' r g b a = liftIO $ do
+  GL.clearColor $= GL.Color4 r g b a
+  GL.clear [GL.ColorBuffer]
 
 -- | Implementation of Renderer loadShader
 loadShader' :: MonadIO m => FilePath -> m (Shader)

@@ -5,6 +5,9 @@ module Hasami.Renderer
   , Shader(..)
   , TextureUnit(..)
   , UniformValue(..)
+  , RenderState(..)
+  , RenderState'(..)
+  , stateTag
   )
 where
 
@@ -26,6 +29,8 @@ data Renderer = Renderer
   , loadShader :: forall m. MonadIO m => FilePath -> m (Shader)
   , loadTexture :: forall m. MonadIO m => FilePath -> m (Texture)
   , createBuffer :: forall a. Storable a => V.Vector a -> Maybe Int32 -> Maybe Int32 -> Buffer a
+  , pushState :: forall m. MonadIO m => RenderState -> m ()
+  , popState :: forall m. MonadIO m => RenderState -> m ()
   }
 
 -- | Texture interface
@@ -44,3 +49,13 @@ data Shader = Shader
   , unbindShader :: forall m. MonadIO m => m ()
   , setUniform :: forall m. MonadIO m => String -> UniformValue -> m ()
   }
+
+-- | Render state constructors
+data RenderState = ClearColor Float Float Float Float
+
+-- | Render state tags
+data RenderState' = ClearColor'
+
+-- | Convert render state value to tag
+stateTag :: RenderState -> RenderState'
+stateTag (ClearColor _ _ _ _) = ClearColor'
