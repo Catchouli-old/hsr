@@ -12,7 +12,6 @@ import Foreign
 import Data.Vect
 import Control.Monad.IO.Class
 import qualified Data.Vector.Storable as V
-import qualified Graphics.Rendering.OpenGL as GL
 
 -- | Texture units
 data TextureUnit = Texture0
