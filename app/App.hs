@@ -11,10 +11,10 @@ import Control.Monad.State
 import Control.Lens
 import qualified Data.Vector.Storable as V
 import Data.Vect
-import qualified Graphics.Rendering.OpenGL as GL
 
 import Nuklear
 import Hasami.Renderer
+import Hasami.Renderer.GL
 import Hasami.Resources
 
 -- | App state monad
@@ -89,9 +89,9 @@ loop = do
     renderClear renderer 1 0 1 1
 
     bindShader shader
-    bindTexture tex 0
-    setUniform shader "uni_tex" (GL.TextureUnit 0)
-    setUniform shader "uni_mvp" =<< toGLMat trans
+    bindTexture tex Texture0
+    setUniform shader "uni_tex" $ UniformTexture Texture0
+    setUniform shader "uni_mvp" $ UniformMatrix . fromProjective $ trans
     drawBuffer buf
     unbindShader shader
 
