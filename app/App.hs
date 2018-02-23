@@ -96,7 +96,6 @@ loop = do
       drawBuffer buf
       unbindShader shader
 
-    test nk
     nuklearRender
 
   liftIO $ swapBuffers renderer
