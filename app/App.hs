@@ -7,7 +7,7 @@ where
 
 import qualified SDL
 import Control.Monad (unless)
-import Control.Monad.State
+import Control.Monad.State hiding (withState)
 import Control.Lens
 import qualified Data.Vector.Storable as V
 import Data.Vect
@@ -86,14 +86,15 @@ loop = do
     let buf = createBuffer renderer vertices (Just 2) (Just 2)
 
     -- Clear window
-    renderClear renderer 1 0 1 1
+    withState renderer [ClearColor 0 0 1 1] $ do
+      renderClear renderer
 
-    bindShader shader
-    bindTexture tex Texture0
-    setUniform shader "uni_tex" $ UniformTexture Texture0
-    setUniform shader "uni_mvp" $ UniformMatrix . fromProjective $ trans
-    drawBuffer buf
-    unbindShader shader
+      bindShader shader
+      bindTexture tex Texture0
+      setUniform shader "uni_tex" $ UniformTexture Texture0
+      setUniform shader "uni_mvp" $ UniformMatrix . fromProjective $ trans
+      drawBuffer buf
+      unbindShader shader
 
     test nk
     nuklearRender

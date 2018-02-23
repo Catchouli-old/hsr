@@ -14,6 +14,7 @@ import Graphics.GLUtil (readTexture, texture2DWrap)
 import qualified Data.Vector.Storable as V
 import qualified Graphics.Rendering.OpenGL as GL
 import Data.IORef
+import Control.Concurrent.Stack
 import qualified Data.Map.Strict as M
 
 import Hasami.Renderer
@@ -24,22 +25,86 @@ uvsAttrib :: GL.AttribLocation
 posAttrib = GL.AttribLocation 0
 uvsAttrib = GL.AttribLocation 1
 
+type StateMap = M.Map RenderState' (Stack RenderState)
+type StateApplier = forall m. MonadIO m => RenderState -> m ()
+
 -- | Create a GL renderer
 createRenderer :: SDL.Window -> IO Renderer
 createRenderer win = do
+  stateStacks <- newIORef (M.empty :: StateMap)
   pure $ Renderer
     { swapBuffers = SDL.glSwapWindow win
     , renderClear = renderClear'
     , loadShader = loadShader'
     , loadTexture = loadTexture'
     , createBuffer = createBuffer'
+    , pushState = pushState' stateStacks applyState'
+    , popState = popState' stateStacks applyState'
+    , withState = withState' (pushState' stateStacks applyState') (popState' stateStacks applyState')
     }
 
+-- | Implementation of Renderer withState
+withState' :: MonadIO m
+           => (RenderState -> m ())
+           -> (RenderState -> m ())
+           -> [RenderState]
+           -> m ()
+           -> m ()
+withState' pushState'' popState'' stateSet action = do
+  mapM_ pushState'' stateSet
+  action
+  mapM_ popState'' stateSet
+
+-- | Implementation of Renderer pushState
+pushState' :: MonadIO m => IORef StateMap -> StateApplier -> RenderState -> m ()
+pushState' stateMap applyState'' rs = do
+  stateStack <- getStack stateMap rs
+  liftIO $ stackPush stateStack rs
+  newState <- liftIO $ stackTryPeek stateStack
+  case newState of
+    Just s -> applyState'' s
+    _      -> pure ()
+  checkStack stateStack
+
+-- | Implementation of Renderer popState
+popState' :: MonadIO m => IORef StateMap -> StateApplier -> RenderState -> m ()
+popState' stateMap applyState'' rs = do
+  stateStack <- getStack stateMap rs
+  _ <- liftIO $ stackPop stateStack
+  newState <- liftIO $ stackTryPeek stateStack
+  case newState of
+    Just s -> applyState'' s
+    _      -> pure ()
+  checkStack stateStack
+
+-- | Implementation of Renderer applyState
+applyState' :: MonadIO m => RenderState -> m ()
+applyState' (ClearColor r g b a) = GL.clearColor $= GL.Color4 r g b a
+
+-- | Check the state of the stack is healthy
+checkStack :: MonadIO m => Stack RenderState -> m ()
+checkStack stack = do
+  let maxStack = 100
+  size <- liftIO $ stackSize stack
+  if size > maxStack
+    then error $ "Max stack size (" ++ show (maxStack :: Integer) ++ ") exceeded"
+    else pure ()
+
+-- | Get a state stack from a render state
+getStack :: MonadIO m => IORef StateMap -> RenderState -> m (Stack RenderState)
+getStack stateMap rs = do
+  let rstag = stateTag rs
+  stateMap' <- liftIO $ readIORef stateMap
+  case M.lookup rstag stateMap' of
+    Just stack -> pure stack
+    Nothing    -> do
+      newStack <- liftIO $ stackNew @RenderState
+      liftIO $ writeIORef stateMap (M.insert rstag newStack stateMap')
+      pure newStack
+
 -- | Implementation of Renderer renderClear
-renderClear' :: MonadIO m => Float -> Float -> Float -> Float -> m ()
-renderClear' r g b a = liftIO $ do
-  GL.clearColor $= GL.Color4 r g b a
-  GL.clear [GL.ColorBuffer]
+renderClear' :: MonadIO m => m ()
+renderClear' = liftIO $ GL.clear [GL.ColorBuffer]
 
 -- | Implementation of Renderer loadShader
 loadShader' :: MonadIO m => FilePath -> m (Shader)

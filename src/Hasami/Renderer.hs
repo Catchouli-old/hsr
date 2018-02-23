@@ -25,12 +25,13 @@ data UniformValue = UniformFloat Float | UniformTexture TextureUnit | UniformMat
 -- | Renderer interface
 data Renderer = Renderer
   { swapBuffers :: forall m. MonadIO m => m ()
-  , renderClear :: forall m. MonadIO m => Float -> Float -> Float -> Float -> m ()
+  , renderClear :: forall m. MonadIO m => m ()
   , loadShader :: forall m. MonadIO m => FilePath -> m (Shader)
   , loadTexture :: forall m. MonadIO m => FilePath -> m (Texture)
   , createBuffer :: forall a. Storable a => V.Vector a -> Maybe Int32 -> Maybe Int32 -> Buffer a
   , pushState :: forall m. MonadIO m => RenderState -> m ()
   , popState :: forall m. MonadIO m => RenderState -> m ()
+  , withState :: forall m. MonadIO m => [RenderState] -> m () -> m ()
   }
 
 -- | Texture interface
@@ -52,9 +53,11 @@ data Shader = Shader
 
 -- | Render state constructors
 data RenderState = ClearColor Float Float Float Float
+  deriving (Show)
 
 -- | Render state tags
 data RenderState' = ClearColor'
+  deriving (Show, Ord, Eq)
 
 -- | Convert render state value to tag
 stateTag :: RenderState -> RenderState'
