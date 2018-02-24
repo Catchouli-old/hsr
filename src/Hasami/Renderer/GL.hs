@@ -148,12 +148,18 @@ loadShader' path = liftIO $ do
     plog <- GL.get $ GL.programInfoLog prog
     putStrLn plog
 
+  activeUniforms <- GL.get (GL.activeUniforms prog)
+  let getUniformLoc = \(_, _, name) -> GL.get (GL.uniformLocation prog name) >>= \loc -> return (name, loc)
+  activeUniformLocations <- mapM getUniformLoc activeUniforms
+  let uniforms = M.fromList $ activeUniformLocations
+
   pure $ Shader { bindShader = GL.currentProgram $= Just prog
                 , unbindShader = GL.currentProgram $= Nothing
                 , setUniform = \name val -> do
                     GL.currentProgram $= Just prog
-                    loc <- GL.get (GL.uniformLocation prog name)
-                    setUniform' loc val
+                    case M.lookup name uniforms of
+                         Just loc -> setUniform' loc val
+                         Nothing -> pure ()
                 }
 
 -- | Implementation of Shader setUniform

@@ -6,10 +6,12 @@ import qualified SDL as SDL
 import qualified SDL.Internal.Types as SDL
 import qualified SDL.Raw as Raw
 import Control.Monad.IO.Class
+import Control.Monad (when)
 import Foreign
 import qualified Language.C.Inline as C
+import qualified Data.ByteString.Char8 as BS
 
-C.context (mappend C.baseCtx C.funCtx)
+C.context (mconcat [C.baseCtx, C.funCtx, C.bsCtx])
 
 C.verbatim "#define NK_INCLUDE_FIXED_TYPES"
 C.verbatim "#define NK_INCLUDE_STANDARD_IO"
@@ -26,28 +28,13 @@ C.include "<stdio.h>"
 C.include "<SDL2/SDL.h>"
 C.include "<SDL2/SDL_opengl.h>"
 
-C.verbatim "struct nk_sdl_device {"
-C.verbatim "    struct nk_buffer cmds;"
-C.verbatim "    struct nk_draw_null_texture null;"
-C.verbatim "    GLuint font_tex;"
-C.verbatim "};"
-
-C.verbatim "struct nk_sdl_vertex {"
-C.verbatim "    float position[2];"
-C.verbatim "    float uv[2];"
-C.verbatim "    nk_byte col[4];"
-C.verbatim "};"
-
-C.verbatim "static struct nk_sdl {"
-C.verbatim "    SDL_Window *win;"
-C.verbatim "    struct nk_sdl_device ogl;"
-C.verbatim "    struct nk_context ctx;"
-C.verbatim "    struct nk_font_atlas atlas;"
-C.verbatim "} sdl;"
-
 data NK = NK { nkCtx :: Ptr ()
+             , nkAtlas :: Ptr ()
+             , nkSdlWin :: Ptr ()
+             , nkCmdBuffer :: Ptr ()
+             , nkNullDrawTex :: Ptr ()
+             , nkFontTex :: C.CUInt
              }
-data NKAtlas = NKAtlas (Ptr ())
 
 C.verbatim "static void"
 C.verbatim "nk_sdl_clipboard_paste(nk_handle usr, struct nk_text_edit *edit)"
@@ -77,50 +64,61 @@ C.verbatim "}"
 initNuklear :: SDL.Window -> IO NK
 initNuklear (SDL.Window ptr) = do
   ctx <- [C.block| void* {
-    SDL_Window* win = $(void* ptr);
-    sdl.win = win;
-    nk_init_default(&sdl.ctx, 0);
-    sdl.ctx.clip.copy = nk_sdl_clipboard_copy;
-    sdl.ctx.clip.paste = nk_sdl_clipboard_paste;
-    sdl.ctx.clip.userdata = nk_handle_ptr(0);
-    nk_buffer_init_default(&sdl.ogl.cmds);
-    return &sdl.ctx;
+    struct nk_context* ctx = malloc(sizeof(struct nk_context));
+    nk_init_default(ctx, 0);
+    ctx->clip.copy = nk_sdl_clipboard_copy;
+    ctx->clip.paste = nk_sdl_clipboard_paste;
+    ctx->clip.userdata = nk_handle_ptr(0);
+    return ctx;
   } |]
-  pure $ NK
-    { nkCtx = ctx
-    }
-
--- | Initialise atlas with default font
-nuklearInitAtlas :: IO NKAtlas
-nuklearInitAtlas = do
+  cmds <- [C.block| void* {
+    struct nk_buffer* cmds = malloc(sizeof(struct nk_buffer));
+    nk_buffer_init_default(cmds);
+    return cmds;
+  } |]
+  nullDrawTex <- [C.block| void* {
+    // todo: i dont know what the point of this is
+    struct nk_draw_null_texture* null = malloc(sizeof(struct nk_draw_null_texture));
+    return null;
+  } |]
+  fontTex <- [C.block| unsigned int {
+    GLuint font_tex;
+    glGenTextures(1, &font_tex);
+    return font_tex;
+  } |]
   atlas <- [C.block| void* {
-    struct nk_font_atlas* atlas;
+    struct nk_font_atlas* atlas = malloc(sizeof(struct nk_font_atlas));
+    struct nk_context* ctx = $(void* ctx);
 
     // Font stash begin
-    nk_font_atlas_init_default(&sdl.atlas);
-    nk_font_atlas_begin(&sdl.atlas);
-    atlas = &sdl.atlas;
+    nk_font_atlas_init_default(atlas);
+    nk_font_atlas_begin(atlas);
 
     // font stash end
     const void *image; int w, h;
-    image = nk_font_atlas_bake(&sdl.atlas, &w, &h, NK_FONT_ATLAS_RGBA32);
+    image = nk_font_atlas_bake(atlas, &w, &h, NK_FONT_ATLAS_RGBA32);
 
     //nk_sdl_device_upload_atlas(image, w, h);
-    struct nk_sdl_device *dev = &sdl.ogl;
-    glGenTextures(1, &dev->font_tex);
-    glBindTexture(GL_TEXTURE_2D, dev->font_tex);
+    glBindTexture(GL_TEXTURE_2D, $(unsigned int fontTex));
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
     glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, (GLsizei)w, (GLsizei)h, 0,
                 GL_RGBA, GL_UNSIGNED_BYTE, image);
 
-    nk_font_atlas_end(&sdl.atlas, nk_handle_id((int)sdl.ogl.font_tex), &sdl.ogl.null);
-    if (sdl.atlas.default_font)
-        nk_style_set_font(&sdl.ctx, &sdl.atlas.default_font->handle);
+    nk_font_atlas_end(atlas, nk_handle_id((int)$(unsigned int fontTex)), $(void* nullDrawTex));
+    if (atlas->default_font)
+        nk_style_set_font(ctx, &atlas->default_font->handle);
 
     return atlas;
   } |]
-  pure $ NKAtlas atlas
+  pure $ NK
+    { nkCtx = ctx
+    , nkAtlas = atlas
+    , nkCmdBuffer = cmds
+    , nkNullDrawTex = nullDrawTex
+    , nkFontTex = fontTex
+    , nkSdlWin = castPtr ptr
+    }
 
 -- | pollEvent except it also returns the raw events
 pollEvent' :: MonadIO m => m (Maybe (SDL.Event, Ptr Raw.Event))
@@ -142,18 +140,18 @@ pollEvents' =
 
 -- | Handle events
 nuklearHandleEvents :: NK -> [Ptr Raw.Event] -> IO ()
-nuklearHandleEvents nk@(NK ptr) evts = do
-  [C.block| void { nk_input_begin($(void* ptr)); } |]
+nuklearHandleEvents nk@NK{..} evts = do
+  [C.block| void { nk_input_begin($(void* nkCtx)); } |]
   mapM_ (nuklearHandleEvent nk) evts
-  [C.block| void { nk_input_end($(void* ptr)); } |]
+  [C.block| void { nk_input_end($(void* nkCtx)); } |]
 
 nuklearHandleEvent :: NK -> Ptr Raw.Event -> IO ()
-nuklearHandleEvent (NK _) evt = let ptr = castPtr evt in
+nuklearHandleEvent NK{..} evt = let ptr = castPtr evt in
   [C.block| void {
     SDL_Event* evt = $(void* ptr);
 
     //nk_sdl_handle_event(evt);
-    struct nk_context *ctx = &sdl.ctx;
+    struct nk_context *ctx = $(void* nkCtx);
 
     /* optional grabbing behavior */
     if (ctx->input.mouse.grab) {
@@ -162,7 +160,7 @@ nuklearHandleEvent (NK _) evt = let ptr = castPtr evt in
     } else if (ctx->input.mouse.ungrab) {
         int x = (int)ctx->input.mouse.prev.x, y = (int)ctx->input.mouse.prev.y;
         SDL_SetRelativeMouseMode(SDL_FALSE);
-        SDL_WarpMouseInWindow(sdl.win, x, y);
+        SDL_WarpMouseInWindow($(void* nkSdlWin), x, y);
         ctx->input.mouse.ungrab = 0;
     }
     if (evt->type == SDL_KEYUP || evt->type == SDL_KEYDOWN) {
@@ -252,17 +250,18 @@ nuklearHandleEvent (NK _) evt = let ptr = castPtr evt in
   } |]
 
 -- | Render
-nuklearRender :: IO ()
-nuklearRender = [C.block| void {
+nuklearRender :: NK -> IO ()
+nuklearRender NK{..} = [C.block| void {
     //nk_sdl_render(NK_ANTI_ALIASING_ON);
     /* setup global state */
-    struct nk_sdl_device *dev = &sdl.ogl;
+    struct nk_context *ctx = $(void* nkCtx);
+    struct nk_buffer *cmds = $(void* nkCmdBuffer);
     int width, height;
     int display_width, display_height;
     struct nk_vec2 scale;
 
-    SDL_GetWindowSize(sdl.win, &width, &height);
-    SDL_GL_GetDrawableSize(sdl.win, &display_width, &display_height);
+    SDL_GetWindowSize($(void* nkSdlWin), &width, &height);
+    SDL_GL_GetDrawableSize($(void* nkSdlWin), &display_width, &display_height);
     scale.x = (float)display_width/(float)width;
     scale.y = (float)display_height/(float)height;
 
@@ -288,6 +287,12 @@ nuklearRender = [C.block| void {
     glEnableClientState(GL_TEXTURE_COORD_ARRAY);
     glEnableClientState(GL_COLOR_ARRAY);
     {
+        struct nk_sdl_vertex {
+            float position[2];
+            float uv[2];
+            nk_byte col[4];
+        };
+
         GLsizei vs = sizeof(struct nk_sdl_vertex);
         size_t vp = offsetof(struct nk_sdl_vertex, position);
         size_t vt = offsetof(struct nk_sdl_vertex, uv);
@@ -310,7 +315,7 @@ nuklearRender = [C.block| void {
         config.vertex_layout = vertex_layout;
         config.vertex_size = sizeof(struct nk_sdl_vertex);
         config.vertex_alignment = NK_ALIGNOF(struct nk_sdl_vertex);
-        config.null = dev->null;
+        config.null = *(struct nk_draw_null_texture*)$(void* nkNullDrawTex);
         config.circle_segment_count = 22;
         config.curve_segment_count = 22;
         config.arc_segment_count = 22;
@@ -321,7 +326,7 @@ nuklearRender = [C.block| void {
         /* convert shapes into vertexes */
         nk_buffer_init_default(&vbuf);
         nk_buffer_init_default(&ebuf);
-        nk_convert(&sdl.ctx, &dev->cmds, &vbuf, &ebuf, &config);
+        nk_convert(ctx, cmds, &vbuf, &ebuf, &config);
 
         /* setup vertex buffer pointer */
         {const void *vertices = nk_buffer_memory_const(&vbuf);
@@ -331,7 +336,7 @@ nuklearRender = [C.block| void {
 
         /* iterate over and execute each draw command */
         offset = (const nk_draw_index*)nk_buffer_memory_const(&ebuf);
-        nk_draw_foreach(cmd, &sdl.ctx, &dev->cmds)
+        nk_draw_foreach(cmd, ctx, cmds)
         {
             if (!cmd->elem_count) continue;
             glBindTexture(GL_TEXTURE_2D, (GLuint)cmd->texture.id);
@@ -343,7 +348,7 @@ nuklearRender = [C.block| void {
             glDrawElements(GL_TRIANGLES, (GLsizei)cmd->elem_count, GL_UNSIGNED_SHORT, offset);
             offset += cmd->elem_count;
         }
-        nk_clear(&sdl.ctx);
+        nk_clear(ctx);
         nk_buffer_free(&vbuf);
         nk_buffer_free(&ebuf);
     }
@@ -367,23 +372,85 @@ nuklearRender = [C.block| void {
     glPopAttrib();
   } |]
 
-nuklearShutdown :: IO ()
-nuklearShutdown = [C.block| void {
-    struct nk_sdl_device *dev = &sdl.ogl;
-    nk_font_atlas_clear(&sdl.atlas);
-    nk_free(&sdl.ctx);
-    glDeleteTextures(1, &dev->font_tex);
-    nk_buffer_free(&dev->cmds);
-    memset(&sdl, 0, sizeof(sdl));
+nuklearShutdown :: NK -> IO ()
+nuklearShutdown NK{..} = [C.block| void {
+    struct nk_context *ctx = $(void* nkCtx);
+    struct nk_font_atlas *atlas = $(void* nkAtlas);
+    struct nk_buffer *cmds = $(void* nkCmdBuffer);
+    unsigned int fontTex = $(unsigned int nkFontTex);
+
+    nk_font_atlas_clear(atlas);
+    nk_free(ctx);
+    glDeleteTextures(1, &fontTex);
+    nk_buffer_free(cmds);
+    free(ctx);
+    free(atlas);
+    free(cmds);
+    free($(void* nkNullDrawTex));
   } |]
 
 C.verbatim "int textLen;"
 C.verbatim "char textBuf[1024];"
 
-test :: NK -> IO ()
-test (NK ptr) = do
+C.verbatim "#define BS(name, ptr, len) char name[len+1]; memcpy(name, ptr, len); name[len] = 0;"
+
+data WindowFlag = NkWindowBorder | NkWindowMovable | NkWindowScalable | NkWindowClosable
+                | NkWindowMinimizable | NkWindowNoScrollbar | NkWindowTitle | NkWindowScrollAutoHide
+                | NkWindowBackground | NkWindowScaleLeft | NkWindowNoInput
+
+windowFlag :: WindowFlag -> C.CInt
+windowFlag NkWindowBorder = 1
+windowFlag NkWindowMovable = 2
+windowFlag NkWindowScalable = 4
+windowFlag NkWindowClosable = 8
+windowFlag NkWindowMinimizable = 16
+windowFlag NkWindowNoScrollbar = 32
+windowFlag NkWindowTitle = 64
+windowFlag NkWindowScrollAutoHide = 128
+windowFlag NkWindowBackground = 256
+windowFlag NkWindowScaleLeft = 512
+windowFlag NkWindowNoInput = 1024
+
+windowFlags :: [WindowFlag] -> C.CInt
+windowFlags = foldr (\a b -> b .|. windowFlag a) 0
+
+defaultWindow :: [WindowFlag]
+defaultWindow = [ NkWindowBorder
+                , NkWindowMovable
+                , NkWindowScalable
+                , NkWindowMinimizable
+                , NkWindowTitle
+                ]
+
+nkWindow :: NK -> String -> [WindowFlag] -> IO () -> IO ()
+nkWindow NK{..} title flags act = do
+  let titleBS = BS.pack title
+  let flags' = windowFlags flags
+  open <- [C.block| int {
+    BS(title, $bs-ptr:titleBS, $bs-len:titleBS)
+    return nk_begin($(void* nkCtx), title, nk_rect(50, 50, 230, 250), $(int flags'));
+  } |]
+  when (open /= 0) act
+  [C.block| void { nk_end($(void* nkCtx)); } |]
+
+nkLayoutDynamic :: NK -> Int -> Int -> IO ()
+nkLayoutDynamic NK{..} rowHeight cols = let rowHeightC = fromIntegral rowHeight
+                                            colsC = fromIntegral cols in
   [C.block| void {
-    struct nk_context* ctx = $(void* ptr);
+    nk_layout_row_dynamic($(void* nkCtx), $(int rowHeightC), $(int colsC));
+  } |]
+
+nkLabel :: NK -> String -> IO ()
+nkLabel NK{..} text = let textBS = BS.pack text in
+  [C.block| void {
+    BS(text, $bs-ptr:textBS, $bs-len:textBS);
+    nk_label($(void* nkCtx), text, NK_TEXT_LEFT);
+  } |]
+
+test :: NK -> IO ()
+test NK{..} = do
+  [C.block| void {
+    struct nk_context* ctx = $(void* nkCtx);
 
     struct nk_colorf bg;
     bg.r = 0.1f; bg.g = 0.18f; bg.b = 0.24f; bg.a = 1.0f;

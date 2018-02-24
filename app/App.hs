@@ -30,6 +30,8 @@ data AppState = AppState
   , _texture :: Texture
   , _nuklearContext :: NK
   , _renderer' :: Renderer
+  , _frameTimeCPU :: Float
+  , _frameTimeTotal :: Float
   }
 makeLenses ''AppState
 
@@ -40,21 +42,27 @@ initApp win = do
   prog <- resourcePath >=> loadShader renderer $ "sprite.glsl"
   tex <- resourcePath >=> loadTexture renderer $ "patchouli.png"
   nk <- initNuklear win
-  _ <- nuklearInitAtlas
   pure $ AppState
     { _shaderProgram = prog
     , _texture = tex
     , _nuklearContext = nk
     , _renderer' = renderer
+    , _frameTimeCPU = 0
+    , _frameTimeTotal = 0
     }
 
 -- | Application
 app :: App ()
-app = loop
+app = do
+  loop
+  nk <- use nuklearContext
+  liftIO $ nuklearShutdown nk
 
 -- | Main loop
 loop :: App ()
 loop = do
+  time <- liftIO $ SDL.time
+
   evt <- pollEvents'
   let rawEvents = map snd evt
   let events = map fst evt
@@ -65,12 +73,12 @@ loop = do
   tex <- use texture
   nk <- use nuklearContext
 
+  ftCpu <- use frameTimeCPU
+  ftTotal <- use frameTimeTotal
+
   liftIO $ nuklearHandleEvents nk rawEvents
 
   liftIO $ do
-    -- Get current time
-    time <- SDL.time
-
     -- Set up projection matrix
     let offset = Vec3 (sin time) 0 0
     let trans = translate4 offset idmtx
@@ -96,9 +104,19 @@ loop = do
       drawBuffer buf
       unbindShader shader
 
-    nuklearRender
+    nkWindow nk "Debug" defaultWindow $ do
+      nkLayoutDynamic nk 20 1
+      nkLabel nk $ "Frame time (cpu): " ++ show ftCpu
+      nkLabel nk $ "Frame time (total): " ++ show ftTotal
+    nuklearRender nk
+
+  beforeSwapBuffers <- liftIO $ SDL.time
+  frameTimeCPU .= (beforeSwapBuffers - time) * 1000
 
   liftIO $ swapBuffers renderer
+
+  afterSwapBuffers <- liftIO $ SDL.time
+  frameTimeTotal .= (afterSwapBuffers - time) * 1000
 
   unless quit loop
 
